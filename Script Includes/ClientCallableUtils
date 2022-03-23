@@ -1,0 +1,772 @@
+var SDM_ClientCallableUtils = Class.create();
+SDM_ClientCallableUtils.prototype = Object.extendsObject(global.AbstractAjaxProcessor, {
+
+    server: gs.getProperty("glide.servlet.uri"),
+
+    endPoint: gs.getProperty("apigateway.endpoint"),
+
+    env: function() {
+        var UAT = /.(?:dev|test)./.test(this.server);
+        if (UAT === true) {
+            return "UAT";
+        } else {
+            return "PROD";
+        }
+    },
+    //
+
+    compareProjectSLAdates: function(tableName, recordId) {
+        tableName = tableName || this.getParameter('sysparm_class');
+        recordId = recordId || this.getParameter('sysparm_sysid');
+
+        var caseGR = new GlideRecord(tableName);
+        caseGR.get(recordId);
+
+        var slaDate = caseGR.getValue("due_date");
+        var projectEndDate = caseGR.project.end_date;
+        var sladatevalue = new GlideDateTime(slaDate).getNumericValue();
+        var projectdatevalue = new GlideDateTime(projectEndDate).getNumericValue();
+        if (projectdatevalue > sladatevalue) return true;
+        return false;
+    },
+
+    // Inputs: sysID of the customer_project record, Planned End Date value, Yes/No
+    isProjectEndDateBeyondAnySLAdate: function(projectID, endDate, getCaseList) {
+        projectID = projectID || this.getParameter('sysparm_sysid');
+        endDate = endDate || this.getparameter('sysparm_enddate');
+        getCaseList = getCaseList || this.getparameter('sysparm_getcaselist');
+
+        var endDateValue = new GlideDateTime(endDate).getNumericValue();
+
+        var lmacs = new GlideRecord("x_att2_sdm_transfo_lmac");
+        var pmacs = new GlideRecord("x_att2_sdm_transfo_pmac");
+        var projects = new GlideRecord("x_att2_sdm_transfo_project");
+        lmacs.addQuery("project", projectID);
+        lmacs.addActiveQuery();
+        lmacs.query();
+
+        pmacs.addActiveQuery();
+        pmacs.addQuery("project", projectID);
+        pmacs.query();
+
+        projects.addActiveQuery();
+        projects.addQuery("project", projectID);
+        projects.query();
+
+        var caseList = [];
+        var slaDate = '';
+        while (lmacs.next()) {
+            slaDate = new GlideDateTime(lmacs.getValue("due_date")).getNumericValue();
+            if (slaDate > 0 && endDateValue > slaDate) caseList.push(lmacs.getValue('number'));
+        }
+        while (pmacs.next()) {
+            slaDate = new GlideDateTime(pmacs.getValue("due_date")).getNumericValue();
+            if (slaDate > 0 && endDateValue > slaDate) caseList.push(pmacs.getValue('number'));
+        }
+        while (projects.next()) {
+            slaDate = new GlideDateTime(projects.getValue("due_date")).getNumericValue();
+            if (slaDate > 0 && endDateValue > slaDate) caseList.push(projects.getValue('number'));
+        }
+
+        if (getCaseList.toLowerCase() == 'no' && caseList.length > 0) {
+            return true;
+        } else if (getCaseList.toLowerCase() == 'yes') {
+            return caseList.join(', ');
+        }
+
+        return false;
+    },
+
+    isGivenDateTimeMoreThanCurrent: function() {
+        var givenDTvalue = this.getParameter("sysparm_date_time_ms");
+        var currentDTvalue = new GlideDateTime().getNumericValue();
+        if (currentDTvalue > givenDTvalue) {
+            return false;
+        }
+        return true;
+    },
+
+    createIssue: function() {
+        var sdmIssue = this.getParameter("sysparm_id");
+        var parent = this.getParameter("sysparm_parent");
+        var isWorkspace = this.getParameter("sysparm_workspace");
+        var issueData = this.getParameter("sysparm_issueData");
+        var sdmIssueGR = new GlideRecord("x_att2_sdm_transfo_issue");
+        var issue = new GlideRecord("issue");
+        if (isWorkspace) {
+            issueData = JSON.parse(issueData);
+            sdmIssueGR.initialize();
+            sdmIssueGR.setValue("source", issueData.source);
+            sdmIssueGR.setValue("root_cause", issueData.root_cause);
+            sdmIssueGR.setValue("issue_owner", issueData.issue_owner);
+            sdmIssue = sdmIssueGR.insert();
+        }
+        issue.newRecord();
+        issue.setValue("x_att2_sdm_transfo_sdm_issue", sdmIssue);
+        issue.setValue("state", 1);
+        issue.setValue("parent", parent);
+        issue.setValue("short_description", "SDM issue");
+        var issueID = issue.insert();
+        sdmIssueGR.get(sdmIssue);
+        sdmIssueGR.issue = issueID;
+        sdmIssueGR.parent = parent;
+        sdmIssueGR.update();
+        return issueID;
+    },
+
+    isSDMIssue: function() {
+        var issueID = this.getParameter("sysparm_id");
+        var issue = new GlideRecord("issue");
+        issue.get(issueID);
+        if (issue.x_att2_sdm_transfo_sdm_issue) {
+            return true;
+        }
+        return false;
+    },
+
+    getGPSNotes: function() {
+        var id = this.getParameter("sysparm_id");
+        var inputs = {};
+        inputs['object_id'] = id; // String 
+        inputs['object_type'] = "CLIENT REQUEST"; // Choice 
+        //inputs['attuid'] = ; // String
+        var result = sn_fd.FlowAPI.getRunner().action('x_att2_sdm_transfo.gps__get_gps_notes_sdm').inForeground().withInputs(inputs).run();
+        var outputs = result.getOutputs();
+        var status = outputs['status']; // String
+        var error_message = outputs['error_message']; // String
+        var gps_error_message = outputs['gps_error_message']; // String
+        //var notes = outputs['notes']; // Array.Object
+        var notelistasstring = outputs['notelistasstring']; // String
+
+        var notes = JSON.parse(notelistasstring);
+        //Sort notes
+        notes = notes.sort(function(a, b) {
+            var param_a = a.dateModified;
+            var param_b = b.dateModified;
+            if (!param_a) param_a = a.dateCreated;
+            if (!param_b) param_b = b.dateCreated;
+
+            if (param_a > param_b) return -1;
+            if (param_a < param_b) return 1;
+            return 0;
+        });
+
+        var response = {
+            status: status,
+            error: gps_error_message,
+            notes: notes
+        };
+        return JSON.stringify(response);
+    },
+
+    changeCaseType: function(id, oldCaseType, newCaseType) {
+        id = id || this.getParameter('sysparm_sysid');
+        oldCaseType = oldCaseType || this.getParameter('sysparm_oldCaseType');
+        newCaseType = newCaseType || this.getParameter('sysparm_newCaseType');
+        var oldCase = new GlideRecord(oldCaseType);
+        var newCase = new GlideRecord(newCaseType);
+        oldCase.get(id);
+
+        // Create new case from the current case
+        newCase.initialize();
+        for (var field in oldCase) {
+            if (!(field.startsWith('sys_') || field == 'number')) {
+                newCase[field] = oldCase[field];
+            }
+        }
+        newCase.state = 1;
+        newCase.assignment_group = "";
+        newCase.reclassified_from = id;
+        var oldCaseTypeName = "";
+        switch (oldCaseType) {
+            case 'x_att2_sdm_transfo_lmac':
+                {
+                    oldCaseTypeName = "LMAC Case";
+                    break;
+                }
+            case 'x_att2_sdm_transfo_pmac':
+                {
+                    oldCaseTypeName = "PMAC Case";
+                    break;
+                }
+            case 'x_att2_sdm_transfo_project':
+                {
+                    oldCaseTypeName = "Project Case";
+                }
+        }
+        newCase.reclassified_type = oldCaseTypeName;
+        var newId = newCase.insert();
+        var newCaseNum = newCase.number;
+
+        // Carry over attachments if any
+        var attachments = new GlideSysAttachment();
+        attachments.copy(oldCaseType, id, newCaseType, newId);
+
+        var typeName, userName = gs.getUserDisplayName();
+        switch (newCaseType) {
+            case 'x_att2_sdm_transfo_lmac':
+                {
+                    typeName = "LMAC";
+                    break;
+                }
+            case 'x_att2_sdm_transfo_pmac':
+                {
+                    typeName = "PMAC";
+                    break;
+                }
+            case 'x_att2_sdm_transfo_project':
+                {
+                    typeName = "Project";
+                }
+        }
+        //gs.addInfoMessage("New " + typeName + " case " + newCaseNum + " created. <a href=" + getRedirectURL(newCaseType, newId) + " target='_blank'>Open Record</a>");
+        // Cancel current case
+        oldCase.state = 7;
+        oldCase.reclassified_to = newId;
+        oldCase.reclassified_type = typeName;
+        var worknote = "A new " + typeName + " case " + newCaseNum + " has been created in place of this case by " + userName;
+        oldCase.work_notes = worknote;
+        oldCase.correlation_id = ''; //removing correlation id so that any new attachments or notes get added to the new case record
+        oldCase.update();
+
+        return newId;
+    },
+
+    listSDMAssignmentGroups: function() {
+        var sdmGroups = [];
+        var groupType = new GlideRecord("sys_user_group_type");
+        groupType.get("name", "ATT - SDM");
+
+        var groups = new GlideRecord("sys_user_group");
+        groups.addQuery("type", "CONTAINS", groupType.getUniqueValue());
+        groups.addQuery("u_access", false);
+        groups.query();
+        while (groups.next()) {
+            sdmGroups.push(groups.getUniqueValue());
+        }
+        return sdmGroups;
+    },
+
+    //replace /r and /n in a string to </br> for HTML
+    nl2br: function(str) {
+        return str.replace(/(?:\r\n|\r|\n)/g, '</br>');
+    },
+
+    // Take the sys_id of the list control of a related list and return the name of that related list
+    getRelatedListName: function(listControlId) {
+        var listControlGR = new GlideRecord("sys_ui_list_control");
+        listControlGR.get(listControlId);
+        var relationshipGR = new GlideRecord("sys_relationship");
+        relationshipGR.get(listControlGR.related_list.toString().replace("REL:", ""));
+        return relationshipGR.getValue("name");
+    },
+
+    //Collect and send notes to GPS
+    sendNotestoGPS: function() {
+        var failedNotesIDs = this.getParameter("sysparm_ids");
+        var gpsCR = this.getParameter("sysparm_cr");
+        var tableName = this.getParameter("sysparm_table");
+        var recordID = this.getParameter("sysparm_record_id");
+        if (!gpsCR) {
+            if (tableName == "customer_project") {
+                var projectDetails = new GlideRecord("x_att2_sdm_transfo_project_additional_details");
+                projectDetails.get("parent", recordID);
+                gpsCR = projectDetails.client_request.client_request_number.toString();
+            }
+        }
+
+        failedNotesIDs = failedNotesIDs.split(",");
+        var gpsTransactionsGR = new GlideRecord("x_att2_sdm_transfo_gps_transactions");
+        var notes = [];
+        for (var i in failedNotesIDs) {
+            gpsTransactionsGR.get(failedNotesIDs[i]);
+            notes.push(gpsTransactionsGR.getValue('note'));
+        }
+
+        try {
+            var inputs = {};
+            var userGR = new GlideRecord("sys_user");
+            userGR.get(gs.getUserID());
+
+            inputs['userid'] = userGR.getValue("employee_number");
+            //inputs['userid'] = "m35607";
+            inputs['gpscr'] = gpsCR;
+            inputs['notes'] = JSON.stringify(notes);
+            var result = sn_fd.FlowAPI.getRunner().action('x_att2_sdm_transfo.sdmgpsupdatenotes').inForeground().withInputs(inputs).run();
+            var outputs = result.getOutputs();
+            var response_body = outputs['response_body'];
+            var status = outputs['status'];
+
+            if (status == "200") {
+                gpsTransactionsGR.initialize();
+                gpsTransactionsGR.addQuery("sys_id", "IN", failedNotesIDs);
+                gpsTransactionsGR.query();
+                gpsTransactionsGR.status = "success";
+                gpsTransactionsGR.updateMultiple();
+                return "success";
+            } else if (status == "500") {
+                var message;
+                try {
+                    message = JSON.parse(response_body).outputs.requestError.serviceException.text;
+                } catch (err) {
+                    message = "";
+                }
+                return message;
+            }
+            return "";
+        } catch (err) {
+            gs.error("SDM_ClientCallableUtils sendNotestoGPS\n" + err);
+            return "";
+        }
+    },
+    // Re-open case
+    reOpenCase: function(id, table, reason) {
+
+        id = id || this.getParameter('sysparm_sysid');
+        table = table || this.getParameter('sysparm_class');
+        reason = reason || this.getParameter('sysparm_reason');
+        var casegr = new GlideRecord(table);
+        casegr.get(id);
+
+        // Create new case from the current case
+        var newCase = new GlideRecord(table);
+        newCase.initialize();
+        for (var field in casegr) {
+            if (!(field.startsWith('sys_') || field == 'number' || field.includes('close'))) {
+                newCase[field] = casegr[field];
+            }
+        }
+        newCase.active = true;
+        newCase.state = 10;
+        newCase.opened_by = gs.getUserID();
+        newCase.parent = id;
+        newCase.short_description = "Reopened from " + casegr.number + ":" + casegr.short_description + "\nReason: " + reason;
+        var newCaseId = newCase.insert();
+        var attachments = new GlideSysAttachment();
+        attachments.copy(table, id, table, newCaseId);
+        casegr.work_notes = 'Case re-opened as: [code]<a href="' + gs.getProperty('glide.servlet.uri') + table + '.do?sys_id=' + newCaseId + '" target="_blank">' + newCase.number + '</a>[/code]';
+        casegr.update();
+        gs.addInfoMessage("Case reopened successfully Old Case # :" + casegr.number + " New Case # :" + newCase.number);
+        return newCaseId;
+    },
+
+    getPersonsByAccount: function(caseId) {
+        try {
+            caseId = caseId || this.getParameter('sysparm_caseId');
+            this.caseId = caseId;
+            var account = '';
+            var caseGr = new GlideRecord('sn_customerservice_case');
+            caseGr.get(caseId);
+            account = caseGr.account.u_customer_id;
+            if (!account) {
+                return "";
+            }
+
+            var r = new sn_ws.RESTMessageV2('global.API Gateway', 'GPSGetPerson');
+            var reqBody = {
+                "serviceName": "gsdl.json.GPS",
+                "targetEnv": this.env(),
+                "endpointServiceName": "com.att.gps.administration",
+                "methodName": "GPS_Person",
+                "authenticate": {
+                    "userid": "",
+                    "credential": {
+                        "password": ""
+                    }
+                },
+                "inputs": {
+                    "gsdlUrlParameters": [{
+                            "name": "urlParameters",
+                            "value": "customerid=" + account + "&status=Active"
+                        },
+                        {
+                            "name": "dme2Version",
+                            "value": "1"
+                        }
+                    ],
+                    "gsdlHttpHeaders": [{
+                        "name": "X-ATT-OriginatorId",
+                        "value": gs.getProperty("x_att2_sdm_transfo.GPS_User")
+                    }]
+                }
+            };
+            r.setEndpoint(this.endPoint);
+            r.setRequestBody(JSON.stringify(reqBody));
+            var response = r.execute();
+            var responseBody = response.getBody();
+            var httpStatus = response.getStatusCode();
+            if (httpStatus == 200) {
+                return responseBody;
+            } else {
+                return "";
+            }
+        } catch (ex) {
+            var message = ex.message;
+            return "";
+        }
+    },
+
+    getNodePrimaryAssets: function(locationId) {
+        locationId = locationId || this.getParameter('sysparm_locationId');
+        try {
+            var inputs = {};
+            inputs['gemslocid'] = locationId; // String 
+
+            var result = sn_fd.FlowAPI.getRunner().action('x_att2_sdm_transfo.sdm__getassetsupportingdata').inForeground().withInputs(inputs).run();
+            var outputs = result.getOutputs();
+            result = outputs['result']; // String
+            return result;
+        } catch (ex) {
+            var message = ex.getMessage();
+            gs.error(message);
+            return "";
+        }
+    },
+
+    getLocations: function(caseId) {
+        caseId = caseId || this.getParameter('sysparm_caseId');
+        try {
+            var caseGr = new GlideRecord('sn_customerservice_case');
+            caseGr.get(caseId);
+            gemsCoId = caseGr.account.u_gps_company_id;
+
+            var inputs = {};
+            inputs['gemscoid'] = gemsCoId; // String 
+            var result = sn_fd.FlowAPI.getRunner().action('x_att2_sdm_transfo.sdm__getlocationfromaccount').inForeground().withInputs(inputs).run();
+            var outputs = result.getOutputs();
+
+            result = outputs['result']; // String
+            return result;
+        } catch (ex) {
+            var message = ex.getMessage();
+            gs.error(message);
+            return "";
+        }
+
+    },
+
+    isDuplicateAttachment: function(current) {
+        var attachmentGR = new GlideRecord("sys_attachment");
+        attachmentGR.addQuery("table_sys_id", current.table_sys_id);
+        attachmentGR.addQuery("file_name", current.file_name);
+        attachmentGR.addQuery("sys_id", "!=", current.getUniqueValue());
+        attachmentGR.query();
+        if (attachmentGR.getRowCount() > 0) {
+            return true;
+        }
+        return false;
+    },
+
+    //Collect and send files to GPS
+    sendFilestoGPS: function() {
+        try {
+            var fileIDs = this.getParameter("sysparm_ids");
+            var gpsCR = this.getParameter("sysparm_cr");
+            var tableName = this.getParameter("sysparm_table");
+            var recordID = this.getParameter("sysparm_record_id");
+            if (!gpsCR) {
+                if (tableName == "customer_project") {
+                    var projectDetails = new GlideRecord("x_att2_sdm_transfo_project_additional_details");
+                    projectDetails.get("parent", recordID);
+                    gpsCR = projectDetails.client_request.client_request_number.toString();
+                }
+            }
+            fileIDs = fileIDs.split(",");
+            var gpsTransactionsGR = new GlideRecord("x_att2_sdm_transfo_gps_transactions");
+            var userGR = new GlideRecord("sys_user");
+            userGR.get(gs.getUserID());
+            var messages = [];
+            for (var i in fileIDs) {
+                gpsTransactionsGR.get(fileIDs[i]);
+                var inputs = {};
+                inputs['attachmentid'] = gpsTransactionsGR.getValue('attachment'); // String 
+                inputs['gpscr'] = gpsCR; // String 
+                inputs['userid'] = userGR.getValue("employee_number"); // String 
+                inputs['objecttype'] = "CLIENT REQUEST"; // String 
+                inputs['customerviewable'] = true; // True/False 
+                inputs['vendorviewable'] = true; // True/False 
+
+                var result = sn_fd.FlowAPI.getRunner().action('x_att2_sdm_transfo.sdmgpsadddocument').inForeground().withInputs(inputs).run();
+                var outputs = result.getOutputs();
+
+                // Get Outputs:
+                var request_body = outputs['request_body'];
+                var response_body = outputs['response_body'];
+                var status = outputs['status'];
+                if (status == "200") {
+                    gpsTransactionsGR.status = "success";
+                    gpsTransactionsGR.update();
+                    messages.push("\n\n" + gpsTransactionsGR.attachment.file_name + ": Success");
+                } else if (status == "500") {
+                    var message;
+                    try {
+                        message = JSON.parse(response_body).outputs.requestError.serviceException.text;
+                    } catch (err) {
+                        message = "Unknown Error Occurred";
+                    }
+                    messages.push("\n\n" + gpsTransactionsGR.attachment.file_name + ": " + message);
+                    gpsTransactionsGR.status = "fail";
+                    gpsTransactionsGR.update();
+                }
+            }
+            if (messages.length > 0) {
+                return JSON.stringify(messages);
+            } else {
+                return "";
+            }
+        } catch (err) {
+            gs.error("SDM_ClientCallableUtils-sendFilestoGPS\n" + err);
+            return "";
+        }
+    },
+
+    // Create Project Contact after new Customer Contact creation from Project related list
+    createProjectContact: function() {
+        try {
+            var contact_id = this.getParameter("sysparm_contact");
+            var project_id = this.getParameter("sysparm_project");
+
+            var projectGR = new GlideRecord("project_contact");
+            projectGR.newRecord();
+            projectGR.setValue("customer_contact", contact_id);
+            projectGR.setValue("customer_project", project_id);
+            return projectGR.insert();
+        } catch (err) {
+            gs.info("SDM_ClientCallableUtils:createProjectContact - " + err);
+            return "";
+        }
+    },
+
+    isSDMProjectTask: function() {
+        var taskId = this.getParameter('sysparm_id');
+        var taskGr = new GlideRecord("customer_project_task");
+        taskGr.get(taskId);
+        var taskParent = taskGr.getValue("parent");
+        var additionalDetailsGR = new
+        GlideRecord("x_att2_sdm_transfo_project_additional_details");
+        additionalDetailsGR.addQuery("parent", taskParent);
+        additionalDetailsGR.query();
+        if (additionalDetailsGR.getRowCount() > 0) {
+            return true;
+        } else {
+            return false;
+        }
+    },
+
+    isSDMProject: function(projectId) {
+        projectId = projectId ? projectId : this.getParameter("sysparm_id");
+        var additionalDetailsGr = new GlideRecord("x_att2_sdm_transfo_project_additional_details");
+        additionalDetailsGr.addQuery("parent", projectId);
+        additionalDetailsGr.query();
+        if (additionalDetailsGr.getRowCount() > 0) {
+            return true;
+        } else {
+            return false;
+        }
+    },
+
+    getRegionsFromAccountLocations: function(accountID) {
+        accountID = accountID ? accountID : this.getParameter('sysparm_account');
+        var regions = [];
+        var region = "";
+
+        var locations = new GlideRecord('cmn_location');
+        locations.addEncodedQuery('company=' + accountID + "^u_gps_regionISNOTEMPTY");
+        locations.query();
+        while (locations.next()) {
+            if (locations.u_gps_region) {
+                region = locations.getValue('u_gps_region');
+                if (regions.indexOf(region) < 0) {
+                    regions.push(region);
+                }
+            }
+        }
+
+        if (regions.length > 0) {
+            return regions.join();
+        } else {
+            return "";
+        }
+    },
+
+    getAllRegionChoices: function() {
+        var regionChoices = new GlideRecord('sys_choice');
+        regionChoices.addEncodedQuery('name=x_att2_sdm_transfo_project_additional_details^element=region^inactive=false');
+        regionChoices.query();
+        var choiceList = [];
+        while (regionChoices.next()) {
+            choiceList.push(regionChoices.getValue('value'));
+        }
+        return choiceList.join();
+    },
+
+    getRegionsToBeRemoved: function(accountID) {
+        accountID = accountID ? accountID : this.getParameter('sysparm_account');
+        var choices = this.getAllRegionChoices();
+        var regions = this.getRegionsFromAccountLocations(accountID);
+        if (regions) {
+            regions = regions.split(',');
+            choices = choices.split(',');
+            regions = choices.filter(function(value) {
+                return regions.indexOf(value) < 0;
+            });
+
+            if (regions.length > 0) {
+                return regions.join();
+            } else {
+                return "";
+            }
+        } else {
+            return choices;
+        }
+    },
+
+    getCatalogItemAdditionalDetailsRecord: function(catItemID) {
+        catItemID = catItemID ? catItemID : this.getParameter('sysparm_catitemid');
+        var catItemAdditionalDetailsGr = new GlideRecord('x_att2_sdm_transfo_catalog_item_additional_details');
+        catItemAdditionalDetailsGr.get('catalog_item', catItemID);
+        return catItemAdditionalDetailsGr;
+    },
+
+    recalculateParentCaseEffort: function(sdmCaseID) {
+        sdmCaseID = sdmCaseID ? sdmCaseID : this.getParameter('sysparm_sdmcaseid');
+        var sdmCaseGr = this.getExtendedCaseRecordFromCaseID(sdmCaseID);
+        var casePlannedEffort = 0;
+        var caseActualEffort = 0;
+        var caseIssuesGr = new GlideRecord('x_att2_sdm_transfo_issue');
+        caseIssuesGr.addQuery('parent', sdmCaseID);
+        caseIssuesGr.query();
+        while (caseIssuesGr.next()) {
+            var issueActualEffort = caseIssuesGr.work_effort.dateNumericValue();
+            caseActualEffort += issueActualEffort;
+        }
+        var caseRITMsAdditionalDetailsGr = new GlideRecord('x_att2_sdm_transfo_requested_item_additional_details');
+        caseRITMsAdditionalDetailsGr.addQuery('requested_item.active', true);
+        caseRITMsAdditionalDetailsGr.addQuery('requested_item.request.parent', sdmCaseID);
+        caseRITMsAdditionalDetailsGr.query();
+        while (caseRITMsAdditionalDetailsGr.next()) {
+            var ritmPlannedEffort = caseRITMsAdditionalDetailsGr.effort.dateNumericValue();
+            casePlannedEffort += ritmPlannedEffort;
+            var ritmActualEffort = caseRITMsAdditionalDetailsGr.work_effort.dateNumericValue();
+            caseActualEffort += ritmActualEffort;
+        }
+        var currentCaseActualEffort = sdmCaseGr.work_effort.dateNumericValue();
+        var currentCasePlannedEffort = sdmCaseGr.effort.dateNumericValue();
+        if (currentCaseActualEffort != caseActualEffort || currentCasePlannedEffort != casePlannedEffort) {
+            sdmCaseGr.work_effort.setDateNumericValue(caseActualEffort);
+            sdmCaseGr.effort.setDateNumericValue(casePlannedEffort);
+            sdmCaseGr.update();
+        }
+    },
+
+    getExtendedCaseRecordFromCaseID: function(sdmCaseID) {
+        sdmCaseID = sdmCaseID ? sdmCaseID : this.getParameter('sysparm_sdmcaseid');
+        var sdmCaseGr = new GlideRecord('sn_customerservice_case');
+        sdmCaseGr.get(sdmCaseID);
+        var extendedCaseTable = sdmCaseGr.sys_class_name;
+        var extendedCaseGr = new GlideRecord(extendedCaseTable);
+        extendedCaseGr.get(sdmCaseID);
+        return extendedCaseGr;
+    },
+
+    /*_________________________________________________________________
+       * Description: Returns Account associated with Case. Used in 'Request Dispatch' record producer
+       * Parameters: Case Sys ID
+       * Returns: {'account' : <Account Sys ID>}
+       ________________________________________________________________*/
+    getCaseAccount: function(caseID) {
+
+        caseID = caseID ? caseID : this.getParameter('sysparm_caseid');
+        var obj = {};
+        obj.account = '';
+        var caseGR = new GlideRecord('sn_customerservice_case');
+        if (caseGR.get(caseID)) {
+            obj.account = caseGR.getValue('account');
+        }
+        return JSON.stringify(obj);
+    },
+
+    getVendorServices: function() {
+        try {
+            var result = sn_fd.FlowAPI.getRunner().action('x_att2_sdm_transfo.sdmget_3pt_vendor_services').inForeground().run();
+            var outputs = result.getOutputs();
+            var results = outputs['results'];
+            if (results) {
+                return JSON.stringify(results);
+            }
+            return '';
+        } catch (ex) {
+            var message = ex.getMessage();
+            gs.error('SDM_ClientCallableUtils:getVendorServices\n' + message);
+        }
+    },
+
+    getVendorProviderService: function(gemslocid) {
+
+        try {
+            gemslocid = gemslocid || this.getParameter('sysparm_gemslocid');
+            var inputs = {};
+            inputs['gems_locid'] = gemslocid; // String 
+
+            var result = sn_fd.FlowAPI.getRunner().action('x_att2_sdm_transfo.sdmget_3pt_vendorprovider_of_services').inForeground().withInputs(inputs).run();
+            var outputs = result.getOutputs();
+            var results = outputs['results'];
+            if (results) {
+                return JSON.stringify(results);
+            }
+
+        } catch (ex) {
+            var message = ex.getMessage();
+            gs.error('SDM_ClientCallableUtils:getVendorProviderService\n' + message);
+        }
+
+    },
+    getCircuitId: function(gemslocid) {
+
+        try {
+            gemslocid = gemslocid || this.getParameter('sysparm_gemslocid');
+            var inputs = {};
+            inputs['gems_locid'] = gemslocid; // String 
+
+            var result = sn_fd.FlowAPI.getRunner().action('x_att2_sdm_transfo.sdmcall_gps').inForeground().withInputs(inputs).run();
+            var outputs = result.getOutputs();
+            var results = outputs['results'];
+            if (results) {
+                return JSON.stringify(results);
+            }
+
+        } catch (ex) {
+            var message = ex.getMessage();
+            gs.error('SDM_ClientCallableUtils:getCircuitId\n' + message);
+        }
+
+    },
+
+    sdmAccountFilters: function(table) {
+        var filter = "u_customer_idISNOTEMPTY";
+        switch (table) {
+            case "x_att2_sdm_transfo_lmac":
+                {
+                    filter += "^u_gps_company_idIN" + gs.getProperty('x_att2_sdm_transfo.sdm.supported.account.companyID');
+                    break;
+                }
+            case "x_att2_sdm_transfo_pmac":
+                {
+                    filter += "^u_gps_company_idIN" + gs.getProperty('x_att2_sdm_transfo.sdm.supported.account.companyID');
+                    break;
+                }
+            case "x_att2_sdm_transfo_project":
+                {
+                    filter += "^u_gps_company_idIN" + gs.getProperty('x_att2_sdm_transfo.sdm.supported.account.companyID');
+                    break;
+                }
+            case "x_att2_sdm_transfo_project_additional_details":
+                {
+                    filter += "^u_customer_idIN" + gs.getProperty('x_att2_sdm_transfo.ProjectAccounts');
+                    break;
+                }
+        }
+        return filter;
+    },
+    type: 'SDM_ClientCallableUtils'
+});
